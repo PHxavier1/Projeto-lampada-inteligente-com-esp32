@@ -1,14 +1,16 @@
 #include <WiFi.h>
-#include <FirebaseESP32.h>
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 
 #define WIFI_SSID "uaifai-tiradentes"
 #define WIFI_PASSWORD "bemvindoaocesar"
-#define API_KEY "AIzaSyDTv4ijb1uYJM8ZtikEjy6MaDhRkSEHAFw"
-#define DATABASE_URL "https://esp-32-95518-default-rtdb.firebaseio.com/"
-#define USER_EMAIL "phsx@cesar.school"
-#define USER_PASSWORD "phsx123!"
+
+#define MQTT_HOST "192.168.0.10"  // ajuste para o IP do broker
+#define MQTT_PORT 1883
+#define MQTT_USER ""
+#define MQTT_PASS ""
+#define MQTT_STATE_TOPIC "lampada/state"
+#define MQTT_COMMAND_TOPIC "lampada/command"
 
 #define R_PIN 18
 #define G_PIN 23
@@ -16,9 +18,8 @@
 #define SLIDER_PIN 39
 #define BOTAO 27
 
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config;
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
 bool ledLigado = true;
 bool estadoAnteriorBotao = HIGH;
@@ -57,24 +58,50 @@ void setup() {
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("Conectado com IP: ");
+  Serial.print("WiFi OK, IP: ");
   Serial.println(WiFi.localIP());
+  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+  mqttClient.setCallback([](char* topic, byte* payload, unsigned int length) {
+    if (strcmp(topic, MQTT_COMMAND_TOPIC) != 0) return;
 
-  config.api_key = API_KEY;
-  config.database_url = DATABASE_URL;
-  auth.user.email = USER_EMAIL;
-  auth.user.password = USER_PASSWORD;
-  config.token_status_callback = tokenStatusCallback;
+    StaticJsonDocument<200> doc;
+    DeserializationError err = deserializeJson(doc, payload, length);
+    if (err) return;
 
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectNetwork(true);
+    bool hasLigado = doc.containsKey("ligado");
+    bool hasSlider = doc.containsKey("slider");
 
-  Serial.println("Conectando ao Firebase...");
-  while (!Firebase.ready()) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nFirebase conectado!");
+    if (!hasLigado && !hasSlider) return;
+    if (hasSlider && (millis() - ultimaInteracaoLocal) < tempoPrioridade) return;
+
+    if (hasLigado) {
+      ledLigado = doc["ligado"];
+    }
+
+    if (hasSlider) {
+      int sliderFirebase = doc["slider"];
+      sliderFirebase = constrain(sliderFirebase, 0, 4095);
+      ultimoSlider = sliderFirebase;
+      ultimaCor = determinarCor(sliderFirebase);
+      if (ledLigado) {
+        atualizarLED(sliderFirebase);
+      }
+    }
+
+    if (!ledLigado) {
+      analogWrite(R_PIN, 0);
+      analogWrite(G_PIN, 0);
+      analogWrite(B_PIN, 0);
+      ultimaCor = "Desligado";
+    }
+
+    ultimaInteracaoLocal = millis();
+    publicarEstado();
+  });
+
+  ultimoSlider = analogRead(SLIDER_PIN);
+  ultimaCor = determinarCor(ultimoSlider);
+  ultimaInteracaoLocal = millis();
 }
 
 void atualizarLED(int valorSlider) {
@@ -107,15 +134,63 @@ void atualizarLED(int valorSlider) {
   analogWrite(B_PIN, b);
 }
 
+void publicarEstado() {
+  StaticJsonDocument<200> doc;
+  doc["ligado"] = ledLigado;
+  doc["slider"] = ultimoSlider;
+  doc["cor"] = ultimaCor;
+  doc["lastUpdated"] = millis();
+
+  char buffer[200];
+  size_t n = serializeJson(doc, buffer);
+  mqttClient.publish(MQTT_STATE_TOPIC, buffer, true);
+}
+
+void garantirMQTT() {
+  while (!mqttClient.connected()) {
+    String clientId = "esp32-lamp-";
+    clientId += String(random(0xffff), HEX);
+
+    bool conectado;
+    if (strlen(MQTT_USER) > 0) {
+      conectado = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASS);
+    } else {
+      conectado = mqttClient.connect(clientId.c_str());
+    }
+
+    if (conectado) {
+      mqttClient.subscribe(MQTT_COMMAND_TOPIC);
+      publicarEstado();
+      break;
+    }
+
+    delay(1000);
+  }
+}
+
 void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.reconnect();
+    delay(500);
+    return;
+  }
+  garantirMQTT();
+  mqttClient.loop();
+
   bool estadoBotao = digitalRead(BOTAO);
   if (estadoAnteriorBotao == HIGH && estadoBotao == LOW) {
     ledLigado = !ledLigado;
     Serial.println(ledLigado ? "LED LIGADO" : "LED DESLIGADO");
-    if (Firebase.ready()) {
-      Firebase.setBool(fbdo, "/lampada/ligado", ledLigado);
-      Firebase.setString(fbdo, "/lampada/cor", ledLigado ? ultimaCor : "Desligado");
+    ultimaInteracaoLocal = millis();
+    if (!ledLigado) {
+      analogWrite(R_PIN, 0);
+      analogWrite(G_PIN, 0);
+      analogWrite(B_PIN, 0);
+      ultimaCor = "Desligado";
+    } else {
+      atualizarLED(ultimoSlider);
     }
+    publicarEstado();
   }
   estadoAnteriorBotao = estadoBotao;
 
@@ -136,40 +211,8 @@ void loop() {
         Serial.print(valorSlider);
         Serial.print(" | Cor: ");
         Serial.println(corAtual);
-
-        if (Firebase.ready()) {
-          Firebase.setInt(fbdo, "/lampada/slider", valorSlider);
-          Firebase.setString(fbdo, "/lampada/cor", corAtual);
-        }
       }
-    }
-  }
-
-  // Após 5 segundos sem interação física, lê do Firebase
-  if (millis() - ultimaInteracaoLocal > tempoPrioridade) {
-    if (Firebase.ready()) {
-      if (Firebase.getBool(fbdo, "/lampada/ligado")) {
-        ledLigado = fbdo.boolData();
-      }
-      if (Firebase.getInt(fbdo, "/lampada/slider")) {
-        int sliderFirebase = fbdo.intData();
-        if (ledLigado) {
-          atualizarLED(sliderFirebase);
-          String corFirebase = determinarCor(sliderFirebase);
-
-          if (corFirebase != ultimaCor) {
-            ultimaCor = corFirebase;
-            Serial.print("[Remoto] Slider: ");
-            Serial.print(sliderFirebase);
-            Serial.print(" | Cor: ");
-            Serial.println(corFirebase);
-          }
-        } else {
-          analogWrite(R_PIN, 0);
-          analogWrite(G_PIN, 0);
-          analogWrite(B_PIN, 0);
-        }
-      }
+      publicarEstado();
     }
   }
 

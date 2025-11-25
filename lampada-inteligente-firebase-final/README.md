@@ -1,46 +1,24 @@
-# Lâmpada Inteligente ESP32 - Frontend Firebase
+# Lâmpada Inteligente ESP32 - Frontend MQTT
 
-Este é o frontend standalone para o projeto de lâmpada inteligente ESP32 que funciona diretamente com Firebase.
+Frontend standalone para a lâmpada ESP32 agora via MQTT (broker local ou remoto com WebSocket habilitado).
 
 ## Configuração Rápida
 
-### 1. Configurar Firebase
-1. Acesse [console.firebase.google.com](https://console.firebase.google.com)
-2. Crie um novo projeto ou use um existente
-3. Ative o "Realtime Database"
-4. Configure as regras do banco de dados:
+### 1. Configurar Broker MQTT
+1. Use Mosquitto com listeners TCP e WebSocket (exemplo: 1883 e 9001).
+2. Deixe anon liberado para teste ou configure usuário/senha/TLS.
 
-```json
-{
-  "rules": {
-    "lampada": {
-      ".read": true,
-      ".write": true
-    }
-  }
-}
+### 2. Variáveis de Ambiente (.env)
+```
+VITE_MQTT_HOST=localhost
+VITE_MQTT_PORT=9001
+VITE_MQTT_PATH=/mqtt
+# VITE_MQTT_TLS=true
+# VITE_MQTT_USERNAME=seu_usuario
+# VITE_MQTT_PASSWORD=sua_senha
 ```
 
-### 2. Obter Credenciais
-1. No console Firebase, vá em Configurações do projeto (ícone engrenagem)
-2. Role até "Seus aplicativos" e clique em "Configuração"
-3. Copie as credenciais do firebaseConfig
-
-### 3. Configurar o Projeto
-1. Crie um arquivo `.env` na raiz do projeto
-2. Adicione suas credenciais Firebase:
-
-```env
-VITE_FIREBASE_API_KEY=sua_api_key_aqui
-VITE_FIREBASE_AUTH_DOMAIN=seu_projeto.firebaseapp.com
-VITE_FIREBASE_DATABASE_URL=https://seu_projeto-default-rtdb.firebaseio.com/
-VITE_FIREBASE_PROJECT_ID=seu_projeto_id
-VITE_FIREBASE_STORAGE_BUCKET=seu_projeto.appspot.com
-VITE_FIREBASE_MESSAGING_SENDER_ID=123456789
-VITE_FIREBASE_APP_ID=1:123456789:web:abcdef
-```
-
-### 4. Instalar e Executar
+### 3. Instalar e Executar
 ```bash
 npm install
 npm run dev
@@ -50,33 +28,23 @@ npm run dev
 
 - ✅ Controle de liga/desliga da lâmpada
 - ✅ Seleção de 7 cores via slider (Verde, Amarelo, Laranja, Vermelho, Rosa, Roxo, Azul)
-- ✅ Sincronização em tempo real com Firebase
+- ✅ Sincronização em tempo real via MQTT
 - ✅ Interface responsiva e moderna
 - ✅ Logs de atividades
 - ✅ Preview visual das cores
 
-## Estrutura do Firebase
+## MQTT
 
-O sistema usa o caminho `/lampada/` no Realtime Database com a seguinte estrutura:
-
-```json
-{
-  "lampada": {
-    "ligado": false,
-    "cor": "Desligado",
-    "slider": 0,
-    "lastUpdated": "2025-06-21T00:00:00.000Z"
-  }
-}
-```
+Tópicos usados:
+- `lampada/state` (retain) — enviado pelo ESP32: `{ ligado, slider, cor, lastUpdated }`
+- `lampada/command` — enviado pelo frontend: `{ ligado?, slider? }`
 
 ## Compatibilidade com ESP32
 
 Este frontend é compatível com o código Arduino ESP32 que:
-- Lê valores do Firebase no caminho `/lampada/`
-- Atualiza o status da lâmpada em tempo real
-- Controla LED RGB nas cores definidas
-- Sincroniza com potenciômetro físico
+- Publica `lampada/state` via MQTT
+- Aplica comandos recebidos em `lampada/command`
+- Controla LED RGB e slider físico
 
 ## Deploy
 

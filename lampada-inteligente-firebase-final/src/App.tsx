@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { firebaseService, LampData } from './firebase';
+import { mqttService, LampData } from './mqtt';
 import { Lightbulb, Palette, Power, Wifi, WifiOff, AlertCircle } from 'lucide-react';
 
 function App() {
@@ -12,71 +12,59 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<any>({});
 
   useEffect(() => {
-    // Check environment variables
-    const envCheck = {
-      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-      databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
-      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-    };
-    
-    setDebugInfo(envCheck);
-    console.log('Firebase Environment Check:', envCheck);
-    
-    // Check if required vars are missing
-    const missingVars = Object.entries(envCheck)
-      .filter(([, value]) => !value)
-      .map(([key]) => key);
-    
-    if (missingVars.length > 0) {
-      setError(`Variáveis de ambiente não configuradas: ${missingVars.join(', ')}`);
-      setLoading(false);
-      return;
-    }
-
-    // Initialize Firebase connection
-    const initFirebase = async () => {
-      try {
-        console.log('Inicializando Firebase...');
-        await firebaseService.initializeLamp();
-        console.log('Firebase inicializado com sucesso');
+    const unsubscribe = mqttService.connect({
+      onState: (data) => {
+        setLampData(data);
         setConnected(true);
-        
-        // Listen to real-time updates
-        const unsubscribe = firebaseService.onLampStatusChange((data) => {
-          console.log('Dados recebidos do Firebase:', data);
-          setLampData(data);
-          setLoading(false);
-        });
-
-        return unsubscribe;
-      } catch (error: any) {
-        console.error('Firebase connection error:', error);
-        setError(`Erro de conexão Firebase: ${error.message || error}`);
-        setConnected(false);
+        setError(null);
         setLoading(false);
-      }
-    };
+      },
+      onConnect: () => {
+        setConnected(true);
+        setError(null);
+      },
+      onDisconnect: (message) => {
+        setConnected(false);
+        if (loading) setLoading(false);
+        setError(message);
+      },
+    });
 
-    initFirebase();
+    return () => unsubscribe();
   }, []);
 
   const handleToggleLamp = async () => {
     try {
-      await firebaseService.updateLampStatus(!lampData.ligado);
+      const ligado = !lampData.ligado;
+      setLampData((prev) => ({
+        ...prev,
+        ligado,
+        cor: ligado ? prev.cor : "Desligado",
+        lastUpdated: new Date().toISOString()
+      }));
+      mqttService.updateLampStatus(ligado, lampData.slider);
     } catch (error) {
       console.error('Error toggling lamp:', error);
+      setError('Falha ao enviar comando MQTT');
     }
   };
 
   const handleSliderChange = async (value: number) => {
     try {
-      await firebaseService.updateLampColor(value);
+      const color = getColorInfo(value);
+      setLampData((prev) => ({
+        ...prev,
+        ligado: true,
+        slider: value,
+        cor: color.name,
+        lastUpdated: new Date().toISOString()
+      }));
+      mqttService.updateLampColor(value);
     } catch (error) {
       console.error('Error updating color:', error);
+      setError('Falha ao enviar comando MQTT');
     }
   };
 
@@ -92,12 +80,18 @@ function App() {
 
   const currentColor = lampData.ligado ? getColorInfo(lampData.slider) : { name: "Desligado", rgb: "#6b7280" };
 
+  const formatLastUpdated = (value: string) => {
+    const parsed = new Date(value);
+    if (isNaN(parsed.getTime())) return '-';
+    return parsed.toLocaleTimeString('pt-BR');
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Conectando ao Firebase...</p>
+          <p className="text-gray-600">Conectando ao MQTT...</p>
         </div>
       </div>
     );
@@ -118,20 +112,12 @@ function App() {
             <div className="bg-gray-50 p-4 rounded-lg">
               <h3 className="font-medium text-gray-900 mb-2">Como corrigir:</h3>
               <ol className="text-sm text-gray-600 list-decimal list-inside space-y-1">
-                <li>Crie o arquivo .env na raiz do projeto</li>
-                <li>Copie suas credenciais do Firebase Console</li>
-                <li>Preencha todas as variáveis VITE_FIREBASE_*</li>
-                <li>Reinicie o servidor (npm run dev)</li>
+                <li>Verifique se o broker MQTT está rodando</li>
+                <li>Confirme host/porta/path em .env (VITE_MQTT_*)</li>
+                <li>Habilite WebSocket listener (ex: 9001)</li>
+                <li>Reinicie o app (npm run dev)</li>
               </ol>
             </div>
-            
-            <div className="bg-blue-50 p-4 rounded-lg">
-              <h3 className="font-medium text-blue-900 mb-2">Debug Info:</h3>
-              <pre className="text-xs text-blue-800 overflow-auto">
-{JSON.stringify(debugInfo, null, 2)}
-              </pre>
-            </div>
-            
             <p className="text-sm text-gray-500">
               Consulte o arquivo TROUBLESHOOTING.md para mais detalhes.
             </p>
@@ -151,7 +137,7 @@ function App() {
               <Lightbulb className="w-8 h-8 text-blue-600" />
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">Lâmpada Inteligente</h1>
-                <p className="text-gray-600">ESP32 + Firebase</p>
+                <p className="text-gray-600">ESP32 + MQTT</p>
               </div>
             </div>
             <div className="flex items-center space-x-2">
@@ -290,7 +276,7 @@ function App() {
                 <div className="bg-gray-50 p-3 rounded-lg">
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Última Atualização</p>
                   <p className="text-sm font-medium text-gray-900">
-                    {new Date(lampData.lastUpdated).toLocaleTimeString('pt-BR')}
+                    {formatLastUpdated(lampData.lastUpdated)}
                   </p>
                 </div>
               </div>
@@ -298,19 +284,19 @@ function App() {
           </div>
         </div>
 
-        {/* Firebase Info */}
+        {/* MQTT Info */}
         <div className="bg-white rounded-lg shadow-sm p-6 mt-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Informações de Conexão</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <p className="text-sm font-medium text-gray-500">Status Firebase</p>
+              <p className="text-sm font-medium text-gray-500">Status MQTT</p>
               <p className={`text-lg font-semibold ${connected ? 'text-green-600' : 'text-red-600'}`}>
                 {connected ? 'Conectado' : 'Desconectado'}
               </p>
             </div>
             <div>
               <p className="text-sm font-medium text-gray-500">Caminho dos Dados</p>
-              <p className="text-lg font-mono text-gray-900">/lampada/</p>
+              <p className="text-lg font-mono text-gray-900">lampada/state & lampada/command</p>
             </div>
           </div>
         </div>
